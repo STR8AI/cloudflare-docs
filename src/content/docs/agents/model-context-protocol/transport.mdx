@@ -105,6 +105,96 @@ To use apiHandlers, update to @cloudflare/workers-oauth-provider v0.0.4 or later
 
 With these few changes, your MCP server will support both transport methods, making it compatible with both existing and new clients.
 
+## Bidirectional streaming with relatedRequestId
+
+The Agents SDK supports bidirectional streaming for MCP servers, allowing server-to-client requests (such as elicitation requests or notifications) to be routed through the same stream as the originating client request. This is particularly important for the Streamable HTTP transport, which uses a single endpoint for bidirectional messaging.
+
+### How message routing works
+
+When a client sends a request to your MCP server, the transport layer tracks which stream the request came from. When your server needs to send a message back to the client, the routing behavior depends on the message type:
+
+- **Responses and errors**: Automatically routed through the same stream as the request they are responding to, using the `message.id` field
+- **Server-to-client requests**: Can be routed through a specific stream by providing a `relatedRequestId` option that references the original client request ID
+- **Standalone notifications**: Sent through the standalone GET stream (if available) when no `relatedRequestId` is provided
+
+### Using relatedRequestId for elicitation
+
+The `relatedRequestId` option is automatically handled by the MCP SDK when your server uses elicitation or other server-to-client request features. The SDK will include the appropriate `relatedRequestId` to ensure bidirectional communication works correctly.
+
+For example, when using the elicitation API:
+
+```ts
+import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+export class MyMCP extends McpAgent {
+  server = new McpServer(
+    { name: "Demo", version: "1.0.0" },
+    { capabilities: { elicitation: { form: {} } } }
+  );
+
+  async init() {
+    this.server.tool(
+      "getUserName",
+      "Ask the user for their name",
+      {},
+      async () => {
+        // The SDK automatically handles relatedRequestId routing
+        const result = await this.server.server.elicitInput({
+          message: "What is your name?",
+          requestedSchema: {
+            type: "object",
+            properties: {
+              name: { type: "string" }
+            },
+            required: ["name"]
+          }
+        });
+
+        if (result.action === "accept" && result.content?.name) {
+          return {
+            content: [
+              { type: "text", text: `Hello, ${result.content.name}!` }
+            ]
+          };
+        }
+
+        return {
+          content: [{ type: "text", text: "Name not provided" }]
+        };
+      }
+    );
+  }
+}
+```
+
+In this example, when the tool calls `elicitInput()`, the elicitation request is automatically sent through the same POST stream as the original tool call request, ensuring proper bidirectional communication. The client response to the elicitation is then routed back through the same stream.
+
+### Advanced: Custom transport implementation
+
+If you are implementing a custom MCP transport (not using `McpAgent`), you can use the `TransportSendOptions` parameter when sending messages:
+
+```ts
+import type { TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport.js";
+
+// Send a server-to-client request through the same stream as request "req-1"
+await transport.send(
+  {
+    jsonrpc: "2.0",
+    id: "elicit-1",
+    method: "elicitation/create",
+    params: { /* ... */ }
+  },
+  { relatedRequestId: "req-1" }
+);
+```
+
+The transport layer will prioritize routing based on:
+
+1. **Response routing**: If the message has an `id` field matching a previous request (response or error), it uses that request's stream
+2. **Related request routing**: If `relatedRequestId` is provided, the message is sent through the stream associated with that request
+3. **Fallback**: If neither applies, the message is sent through the standalone GET stream
+
 ### Testing with MCP clients
 While most MCP clients have not yet adopted the new Streamable HTTP transport, you can start testing it today using [`mcp-remote`](https://www.npmjs.com/package/mcp-remote), an adapter that lets MCP clients that otherwise only support local connections work with remote MCP servers.
 
